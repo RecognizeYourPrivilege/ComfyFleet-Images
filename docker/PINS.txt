@@ -1,0 +1,281 @@
+ComfyFleet cu130 instance pins (primary tag ghcr.io/recognizeyourprivilege/comfyfleet-images:cu130)
+Peer line: docker/PINS.cu124.txt (ghcr.io/recognizeyourprivilege/comfyfleet-images:cu124, host driver CUDA 12.4).
+
+Base
+  python:3.14.7-slim-bookworm
+    Official CPython 3.14.7 image. Debian bookworm-slim underneath.
+    Bookworm's own python3 package is 3.11 and is not installed.
+    /opt/venv is created from this interpreter. The image build fails unless
+    sys.version_info[:3] == (3, 14, 7).
+  CUDA runtime: cuda-libraries-13-0=13.0.3-1 and cuda-cudart-13-0=13.0.96-1
+    from https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/
+  cuDNN runtime: libcudnn9-cuda-13=9.20.0.48-1
+    Matches the torch 2.13.0+cu130 wheel dependency nvidia-cudnn-cu13==9.20.0.48.
+    The same wheel depends on the PyPI package cuda-toolkit==13.0.3
+    (cublas, cudart, cufft, cufile, cupti, curand, cusolver, cusparse,
+    nvjitlink, nvrtc, nvtx).
+  Host driver: CUDA 13.0. The NVIDIA driver on the machine that runs the
+    container must support CUDA 13.0. The image does not ship the driver.
+    A floating tag does not move an install that pins a digest.
+    An existing container keeps its old layers until it is stopped and
+    replaced: stop, then create --force (same workflow, GPUs, and launch
+    flags), then start. start or restart alone does not replace layers.
+  Host C compiler for Triton JIT (not the CUDA devel toolkit):
+    gcc and libc6-dev from Debian bookworm.
+    Python.h is the header shipped with CPython 3.14.7
+    (/usr/local/include/python3.14). Debian python3-dev is not installed;
+    that package is CPython 3.11. The cu124 line installs python3-dev,
+    which installs zlib1g-dev, and zlib1g-dev depends on libc6-dev, so
+    that line already has crti.o. python3-dev itself only recommends
+    libc6-dev.
+    libc6-dev is explicit here because apt uses --no-install-recommends
+    and therefore does not install gcc's recommended libc-dev. Without
+    crti.o, gcc -shared fails with "cannot find crti.o". The llama import
+    smoke and Triton's cuda_utils link both need that file.
+    torch 2.13.0+cu130 depends on triton==3.7.1. import comfy_kitchen loads
+    backends.triton, and quantization.py's @triton.autotune initializes the
+    NVIDIA driver. That compiles driver.c (cuda_utils) and needs gcc plus
+    Python.h. Without gcc, triton/runtime/build.py raises
+    "Failed to find C compiler. Please specify via CC environment variable."
+    cuda.h ships in the triton wheel. g++, build-essential, and cuda-nvcc
+    are not installed.
+
+PyTorch (CUDA 13.0 wheels)
+  index: https://download.pytorch.org/whl/cu130
+  torch==2.13.0+cu130
+  torchvision==0.28.0+cu130
+  torchaudio==2.11.0+cu130
+  image Python: CPython 3.14.7 in /opt/venv
+  wheels: torch-2.13.0+cu130-cp314-cp314-manylinux_2_28_x86_64.whl
+          torchvision-0.28.0+cu130-cp314-cp314-manylinux_2_28_x86_64.whl
+          torchaudio-2.11.0+cu130-cp314-cp314-manylinux_2_28_x86_64.whl
+  torchvision 0.28.0+cu130 Requires-Dist is torch==2.13.0. The installed
+  2.13.0+cu130 satisfies that specifier (the local version is ignored when
+  the specifier has none). torchvision's Requires-Python excludes 3.14.1
+  only; 3.14.7 is accepted.
+  PIP_NO_CACHE_DIR=1 is set before the first pip install. Each RUN that
+  installs Python packages also deletes /root/.cache/pip. An isolated
+  sam2 build downloaded a second torch into that cache; sam2 is installed
+  with --no-build-isolation instead (see ComfyUI-Impact-Pack below).
+  torchaudio 2.11.0+cu130 is a presence pin. The cu130 index has no
+  torchaudio 2.13 wheel (newest cu130 cp314 wheel is 2.11.0+cu130). PyTorch
+  2.13 install docs omit torchaudio. TorchAudio 2.11 is built against the
+  stable ABI and declares no Requires-Dist, so it installs in the same pip
+  invocation as torch 2.13.0+cu130 and does not downgrade torch. The package
+  name still has to appear in `pip list`: ComfyUI-Manager 14b5aaab does not
+  import torch and does not run `pip show`. After
+  `python -m pip install <package>` (the EXECUTE line, including
+  cryptography; that commit does not pass -U or -c) PIPFixer.fix_broken in
+  glob/manager_util.py reads the `pip list` snapshot taken before the
+  command. It logs "[ComfyUI-Manager] PyTorch is not installed" when torch,
+  torchvision, or torchaudio is absent from that map. If a real
+  torchaudio 2.13+cu130 wheel is published later, prefer it in a follow-up
+  pin bump.
+  PIP_CONSTRAINT points at /opt/comfyfleet/torch-constraints.txt, which
+  lists these three wheels and numpy==2.3.2, so a later Manager install
+  cannot replace them. docker/verify_image_pins.py parses `pip list` the
+  same way and fails the build if any of the three is missing or not the
+  pin above, or if Python is not 3.14.7. No GPU.
+
+ComfyUI
+  https://github.com/Comfy-Org/ComfyUI
+  tag v0.37.4
+  commit 8ff6dc384ba5c410266b40e137799e049459d4f2
+  requirements.txt at that commit also installs comfy-kitchen==0.2.35 and
+  comfy-aimdo==0.5.5. Those are not overridden.
+  Checkout is a full git clone plus that commit. ComfyUI keeps its .git.
+  Pinned ComfyUI-Manager reads it at startup: iter_commits for the revision
+  count, plus the commit hash and date. The notice route prints
+  "Your ComfyUI isn't git repo." when that date is still the 1900 default.
+  A depth-1 repo would report revision 1, so this clone is not shallow.
+
+Custom node checkouts
+  ComfyUI-Manager, Pixaroma, ComfyDock, RES4LYF, Impact-Pack, and
+  Impact-Subpack are fetched with git fetch --depth 1 of the pinned commit.
+  .git is deleted in that same image layer, including any nested .git under
+  baked_custom_nodes or stock_custom_nodes. Manager's version string is a
+  constant in manager_core.py. It does not read its own .git to import.
+  git remains installed so Manager can clone other nodes onto the host
+  custom_nodes mount.
+
+ComfyUI-Manager
+  https://github.com/Comfy-Org/ComfyUI-Manager
+  commit 14b5aaab711ad1f1306d420732a923fb058c44d7
+  That commit reads <user>/__manager/config.ini. ComfyUI v0.37.4 has
+  folder_paths.get_system_user_directory, and the entrypoint does not pass
+  --user-directory, so the file is /opt/ComfyUI/user/__manager/config.ini.
+  A missing file leaves allow_git_url_install and allow_pip_install false.
+  docker/seed_manager_config.py (from the entrypoint, every start) sets
+  allow_git_url_install=true, allow_pip_install=true, security_level=normal
+  in [default] without dropping other keys.
+  is_dedicated_install_allowed in that commit is flag AND loopback listen.
+  --listen stays 0.0.0.0 so Docker can publish the port onto the docker.sock
+  LAN. docker/patch_manager_trusted_install.py (late image layer, after the
+  torch and clone layers) keeps the flag and skips the loopback term when
+  COMFYFLEET_TRUSTED_INSTALL=1, which the entrypoint exports. Unset, the
+  stock check remains. A Manager on the public internet is a different
+  threat model; the env var is the gate for this image.
+
+pixaroma (full repository, not a subset of nodes)
+  https://github.com/pixaroma/ComfyUI-Pixaroma
+  tag v1.4.181
+  commit 9259bc49557a92e3fc14796999468c723bd1ecdd
+
+ComfyUI-ComfyDock
+  https://github.com/RecognizeYourPrivilege/ComfyUI-ComfyDock
+  commit 3a9ff9eba897bf2388d6c1943b01d819ba05a0c6
+
+RES4LYF
+  https://github.com/ClownsharkBatwing/RES4LYF
+  commit 3d1d69da69ee47f7647d59e1bd0967e472fccc41
+  requirements.txt at that commit: opencv-python, matplotlib, pywavelets,
+  numpy>=1.26.4. Installed with -c /opt/comfyfleet/torch-constraints.txt.
+  The entrypoint symlinks baked_custom_nodes/RES4LYF into custom_nodes.
+  Companion git pins were re-checked against ComfyUI v0.37.4 and left as-is.
+
+numpy
+  numpy==2.3.2
+  Installed from PyPI before ComfyUI and custom-node requirements, then
+  written into /opt/comfyfleet/torch-constraints.txt with the torch pins.
+  PIP_CONSTRAINT points at that file. Manager's installer inherits it, so
+  those installs cannot replace numpy (or the CUDA 13.0 torch wheels).
+  ComfyUI v0.37.4 asks for numpy>=1.25.0. RES4LYF asks for numpy>=1.26.4.
+  opencv-python 5 asks for numpy>=2 on Python 3.9+. scipy 1.18 asks for
+  numpy>=2,<2.8. 2.3.2 satisfies those.
+  The previous pin was 2.2.6. That release has no cp314 manylinux wheel, so
+  the image would have built numpy from source or failed. 2.3.2 is the first
+  numpy release with a cp314 manylinux x86_64 wheel
+  (numpy-2.3.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl).
+  The install uses --only-binary=numpy.
+  docker/verify_image_pins.py asserts the version during the image build.
+
+OpenCV shared libraries (Debian bookworm apt, not version-pinned)
+  libxcb1        libxcb.so.1
+  libx11-6       libX11.so.6
+  libxext6       libXext.so.6
+  libice6        libICE.so.6
+  libsm6         libSM.so.6
+  libglib2.0-0   libglib-2.0.so.0 and libgthread-2.0.so.0
+  libgl1         libGL.so.1
+  RES4LYF images.py imports cv2 at custom-node load. opencv-python is not
+  the headless distribution; requirements.txt names opencv-python, and pip
+  would still install that wheel if a headless build were substituted.
+  The wheel pip selects for CPython 3.14 on bookworm today is
+  opencv-python 5.0.0.93 (cp37-abi3 manylinux, which loads on 3.14). Its cv2
+  extension loads bundled Qt, which needs libGL.so.1 and libglib-2.0.so.0
+  at import. The Qt xcb platform plugin libqxcb.so is linked directly to
+  libxcb.so.1 (the crash on bookworm-slim), plus libX11, libXext, libSM,
+  and libICE.
+  matplotlib's Agg backend and the PyWavelets cp314 wheel do not add system
+  libraries beyond glibc and libstdc++ (already present via gcc).
+  The image build runs docker/verify_image_pins.py, which imports cv2 and
+  dlopens libxcb.so.1 and libqxcb.so. No display and no GPU.
+
+comfy-kitchen
+  comfy-kitchen==0.2.35 from ComfyUI v0.37.4 requirements.txt.
+  On CPython 3.14 pip selects
+  comfy_kitchen-0.2.35-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+  (abi3, so it installs on 3.14). That is the native wheel. The previous
+  image forced comfy-kitchen 0.2.36 py3-none-any because its manylinux wheel
+  targeted CUDA 13 while the runtime was CUDA 12.4, then rewrote custom-op
+  annotations with docker/patch_comfy_kitchen_torch26.py. Torch 2.6
+  infer_schema rejected PEP 585 list[int] and list[bool]. Torch 2.7 and
+  later accept those annotations, and this image is torch 2.13.0+cu130, so
+  the rewrite is not applied and the patch file is gone.
+  The image build does not import the top-level comfy_kitchen package.
+  That import loads the Triton backend, and Triton raises "0 active drivers"
+  when the build has no NVIDIA driver. A GPU host gets past that check and
+  JIT-compiles cuda_utils; gcc and the 3.14 Python.h are what that compile
+  uses. The link is -lcuda against the host driver mounted into the
+  container (libcuda.so).
+
+llama-cpp-python
+  llama-cpp-python==0.3.36
+  Baked into this image for JoyCaption. Operators do not pip-install it.
+  A source build is not supported. There is no create-time install and no
+  runtime escape hatch.
+  Wheel: llama_cpp_python-0.3.36-py3-none-manylinux_2_35_x86_64.whl
+    linux x86_64 only. The win_amd64 sibling on the same index is not used.
+  Index: https://abetlen.github.io/llama-cpp-python/whl/cu130
+    The cu124 index is not used on this line.
+  py3-none is required. This image is CPython 3.14.7, and abetlen does not
+  publish a cp314-specific build of this pin. The cu124 line uses the same
+  version with that line's index.
+  The image build clears CXX, CC, and CMAKE_ARGS, then installs with
+  --only-binary=:all:. PyPI 0.3.36 is an sdist. g++, cmake, and a llama.cpp
+  checkout are not added.
+  /opt/comfyfleet/torch-constraints.txt includes llama-cpp-python==0.3.36.
+  PIP_ONLY_BINARY=llama-cpp-python, so a later Manager pip install of
+  llama-cpp-python (JoyCaption requirements) cannot download that sdist.
+  libggml-cuda in the wheel needs libcuda.so.1. That file is the host
+  driver and is not in the image. docker build has no driver. The image
+  verify compiles a temporary gcc stub for the undefined driver symbols,
+  runs `from llama_cpp import Llama`, and deletes the stub in that same
+  step. That gcc -shared link needs crti.o from libc6-dev (see the host
+  C compiler note above). The stub is not on the runtime linker path.
+  The import does not load a model and does not need a GPU.
+  docker/verify_image_pins.py checks the pip list version and the import.
+
+ComfyUI-Impact-Pack
+  https://github.com/ltdrdata/ComfyUI-Impact-Pack
+  branch Main
+  commit 429d0159ad429e64d2b3916e6e7be9c22d025c3c
+  Same commit on the cu124 line.
+  requirements.txt names opencv-python-headless. That line is filtered out
+  before pip install. opencv-python from RES4LYF stays. The constraint file
+  pins opencv-python-headless==99.0.0. That distribution is the placeholder
+  wheel from docker/opencv_headless_shim.py (no cv2 files), installed from
+  /opt/comfyfleet/wheels. PIP_FIND_LINKS points at that directory. Version
+  99.0.0 satisfies albumentations' opencv-python-headless>=4.9.0.80, which
+  is what comfyui-reactor-node pulls in. The published headless wheel does
+  not match the pin, so a Manager git-URL or zip requirements install cannot
+  replace cv2. The previous pin opencv-python-headless<0 matched no
+  distribution and the resolver stopped on that name on this line and on
+  cu124.
+  The filtered requirements include git+https://github.com/facebookresearch/sam2.
+  That project's build-system requires torch>=2.5.1. The image installs the
+  filtered file with --no-build-isolation so the build uses the already
+  installed torch==2.13.0+cu130. An isolated build downloads a second torch
+  from PyPI (not the cu130 index) into /root/.cache/pip. SAM2_BUILD_CUDA=0
+  skips the CUDA extension (this image has no nvcc). --no-build-isolation
+  does not install build dependencies. wheel and setuptools>=70.1 are
+  installed first, the same pair as the cu124 line, so bdist_wheel exists.
+  The probe imports setuptools.command.bdist_wheel before the Impact
+  requirements install. After that install the build checks
+  metadata.version("torch") == 2.13.0+cu130 and imports sam2. The torch,
+  torchvision, and torchaudio pins are unchanged.
+  install.py runs at build with baked_custom_nodes/skip_download_model so it
+  does not download sam_vit_b_01ec64.pth. The sentinel is removed after the
+  run. No SAM weight file is copied into the image.
+  The entrypoint symlinks baked_custom_nodes/ComfyUI-Impact-Pack into
+  custom_nodes and seeds impact-pack.ini:
+    custom_wildcards = /home/wildcards
+  with no quotes. That seed runs on every start.
+
+ComfyUI-Impact-Subpack
+  https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+  branch main
+  commit 50c7b71a6a224734cc9b21963c6d1926816a97f1
+  Same commit on the cu124 line.
+  requirements.txt names opencv-python-headless. That line is filtered out.
+  install.py runs under the same skip_download_model sentinel so the
+  ultralytics detector weights are not baked (the models mount would hide
+  them anyway). The sentinel is removed afterward.
+  The entrypoint symlinks baked_custom_nodes/ComfyUI-Impact-Subpack.
+  The legacy Impact-Pack submodule named subpack is not initialized.
+
+SAM weights
+  Not in this image. Host path /home/models/sams (container
+  /opt/ComfyUI/models/sams on the shared models mount). Create creates that
+  directory. A first-run download into that shared directory is fine.
+  Usual file: sam_vit_b_01ec64.pth from
+  https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+
+Wildcards
+  Host /home/wildcards is bind-mounted at /home/wildcards on every create.
+  The directory is created only when it is missing. An existing directory
+  is not wiped and is not recursively chowned on create. A directory this
+  lane creates is chowned once, not recursively, to comfyuser:comfyuser.
+
+No workflow JSON is baked into this image. The operator file is bind-mounted
+to /opt/comfyfleet/instance/default_workflow.json and loaded on every start.
